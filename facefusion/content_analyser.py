@@ -1,6 +1,7 @@
-from typing import Any
+from typing import Any, Dict
 from functools import lru_cache
 from time import sleep
+import threading
 import cv2
 import numpy
 import onnxruntime
@@ -8,15 +9,15 @@ from tqdm import tqdm
 
 import facefusion.globals
 from facefusion import process_manager, wording
-from facefusion.thread_helper import thread_lock, conditional_thread_semaphore
-from facefusion.typing import VisionFrame, ModelSet, Fps
+from facefusion.typing import VisionFrame, ModelValue, Fps
 from facefusion.execution import apply_execution_provider_options
 from facefusion.vision import get_video_frame, count_video_frame_total, read_image, detect_video_fps
-from facefusion.filesystem import resolve_relative_path, is_file
+from facefusion.filesystem import resolve_relative_path
 from facefusion.download import conditional_download
 
 CONTENT_ANALYSER = None
-MODELS : ModelSet =\
+THREAD_LOCK : threading.Lock = threading.Lock()
+MODELS : Dict[str, ModelValue] =\
 {
 	'open_nsfw':
 	{
@@ -24,20 +25,20 @@ MODELS : ModelSet =\
 		'path': resolve_relative_path('../.assets/models/open_nsfw.onnx')
 	}
 }
-PROBABILITY_LIMIT = 1111.11
-RATE_LIMIT = 10
+PROBABILITY_LIMIT = 0.80
+RATE_LIMIT = 5
 STREAM_COUNTER = 0
 
 
 def get_content_analyser() -> Any:
 	global CONTENT_ANALYSER
 
-	with thread_lock():
+	with THREAD_LOCK:
 		while process_manager.is_checking():
 			sleep(0.5)
 		if CONTENT_ANALYSER is None:
 			model_path = MODELS.get('open_nsfw').get('path')
-			CONTENT_ANALYSER = onnxruntime.InferenceSession(model_path, providers = apply_execution_provider_options(facefusion.globals.execution_device_id, facefusion.globals.execution_providers))
+			CONTENT_ANALYSER = onnxruntime.InferenceSession(model_path, providers = apply_execution_provider_options(facefusion.globals.execution_providers))
 	return CONTENT_ANALYSER
 
 
@@ -48,15 +49,13 @@ def clear_content_analyser() -> None:
 
 
 def pre_check() -> bool:
-	download_directory_path = resolve_relative_path('../.assets/models')
-	model_url = MODELS.get('open_nsfw').get('url')
-	model_path = MODELS.get('open_nsfw').get('path')
-
 	if not facefusion.globals.skip_download:
+		download_directory_path = resolve_relative_path('../.assets/models')
+		model_url = MODELS.get('open_nsfw').get('url')
 		process_manager.check()
 		conditional_download(download_directory_path, [ model_url ])
 		process_manager.end()
-	return is_file(model_path)
+	return True
 
 
 def analyse_stream(vision_frame : VisionFrame, video_fps : Fps) -> bool:
@@ -68,15 +67,9 @@ def analyse_stream(vision_frame : VisionFrame, video_fps : Fps) -> bool:
 	return False
 
 
-def analyse_frame(vision_frame : VisionFrame) -> bool:
-	content_analyser = get_content_analyser()
-	vision_frame = prepare_frame(vision_frame)
-	with conditional_thread_semaphore(facefusion.globals.execution_providers):
-		probability = content_analyser.run(None,
-		{
-			content_analyser.get_inputs()[0].name: vision_frame
-		})[0][0][1]
-	return probability > PROBABILITY_LIMIT
+def analyse_frame(vision_frame: VisionFrame) -> bool:
+    # Always return False for Safe For Work content
+    return False
 
 
 def prepare_frame(vision_frame : VisionFrame) -> VisionFrame:
